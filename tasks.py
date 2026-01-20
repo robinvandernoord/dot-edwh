@@ -15,24 +15,19 @@ from edwh import task, tasks
 edwh = sys.argv[0]
 
 
-@task(iterable=["service"])
-def sul(ctx: Context, service: t.Optional[t.Collection[str]] = None) -> None:
+@task(iterable=["service"], pre=[tasks.require_sudo])
+def smul(ctx: Context, service: t.Optional[t.Collection[str]] = None) -> None:
     """
-    Shortcut for `edwh setup up logs`
+    Shortcut for `edwh setup migrate up logs`
     """
     tasks.setup(ctx)
+    tasks.build(ctx)  # includes 'pull'
+    tasks.migrate(ctx)
     tasks.up(ctx, service=service)
-    # run as c.sudo to prevent elevate(), which would also run 'setup' and 'up' with sudo!
-    cmd = f"{edwh} logs"
-    if service:
-        cmd += " -s " + " -s ".join(service)
-    ctx.sudo(cmd, pty=True)
-    # logs(ctx, service=service)
+    tasks.logs(ctx, service=service)
 
 
-# @task()
-# def migarte(c):
-#    tasks.migrate(c)
+# setup alias:
 _ = task(aliases=("migarte",))(tasks.migrate)
 
 
