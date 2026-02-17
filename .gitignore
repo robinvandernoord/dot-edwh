@@ -3,3 +3,4 @@
 multipass.toml
 __pycache__/
 *.pyc
+passbolt/
