@@ -120,11 +120,14 @@ def _pr_age_style(updated_at: str) -> str:
     return "red"
 
 
-@task
-def prs(ctx: Context) -> None:
+@task(iterable=("exclude",))
+def prs(ctx: Context, exclude: list[str] = None) -> None:
     """
     List open PRs in the organisation, excluding archived and ignored repos.
     """
+    # turn into dependabot AND dependabot[bot]
+    exclude = set(item for user in (exclude or ()) for item in (user, f"{user}[bot]"))
+
     console = Console()
 
     table = Table(
@@ -172,6 +175,9 @@ def prs(ctx: Context) -> None:
             base_ref, head_ref = "-", "-"
 
         author = pr["author"]["login"]
+
+        if author in exclude:
+            continue
 
         assignees = (
             ", ".join(a["login"] for a in pr["assignees"]) if pr["assignees"] else "-"
