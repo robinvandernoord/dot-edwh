@@ -15,24 +15,19 @@ from edwh import task, tasks
 edwh = sys.argv[0]
 
 
-@task(iterable=["service"])
-def sul(ctx: Context, service: t.Optional[t.Collection[str]] = None) -> None:
+@task(iterable=["service"], pre=[tasks.require_sudo])
+def smul(ctx: Context, service: t.Optional[t.Collection[str]] = None) -> None:
     """
-    Shortcut for `edwh setup up logs`
+    Shortcut for `edwh setup migrate up logs`
     """
     tasks.setup(ctx)
+    tasks.build(ctx)  # includes 'pull'
+    tasks.migrate(ctx)
     tasks.up(ctx, service=service)
-    # run as c.sudo to prevent elevate(), which would also run 'setup' and 'up' with sudo!
-    cmd = f"{edwh} logs"
-    if service:
-        cmd += " -s " + " -s ".join(service)
-    ctx.sudo(cmd, pty=True)
-    # logs(ctx, service=service)
+    tasks.logs(ctx, service=service)
 
 
-# @task()
-# def migarte(c):
-#    tasks.migrate(c)
+# setup alias:
 _ = task(aliases=("migarte",))(tasks.migrate)
 
 
@@ -85,6 +80,7 @@ def _pr_run_gh() -> list[PullRequest]:
     result = subprocess.check_output(cmd, text=True)
     return json.loads(result)
 
+
 def _pr_branches(repo: str, number: int) -> tuple[str, str]:
     cmd = [
         "gh",
@@ -100,6 +96,21 @@ def _pr_branches(repo: str, number: int) -> tuple[str, str]:
     data = json.loads(result)
     return data.get("baseRefName", "-"), data.get("headRefName", "-")
 
+
+def _pr_branches(repo: str, number: int) -> tuple[str, str]:
+    cmd = [
+        "gh",
+        "pr",
+        "view",
+        str(number),
+        "--repo",
+        repo,
+        "--json",
+        "baseRefName,headRefName",
+    ]
+    result = subprocess.check_output(cmd, text=True)
+    data = json.loads(result)
+    return data.get("baseRefName", "-"), data.get("headRefName", "-")
 
 
 def _pr_age_color(updated_at: str) -> str:
@@ -126,7 +137,7 @@ def _pr_age_style(updated_at: str) -> str:
     return "red"
 
 
-@task(iterable=('exclude',))
+@task(iterable=("exclude",))
 def prs(ctx: Context, exclude: list[str] = None) -> None:
     """
     List open PRs in the organisation, excluding archived and ignored repos.
