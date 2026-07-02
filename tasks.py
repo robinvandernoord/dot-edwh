@@ -61,6 +61,7 @@ class PullRequest(t.TypedDict):
     title: str
     url: str
     updatedAt: str
+    isDraft: bool
     author: PRUser
     assignees: list[PRUser]
     repository: PRRepository
@@ -79,10 +80,26 @@ def _pr_run_gh() -> list[PullRequest]:
         "--limit",
         str(PR_LIMIT),
         "--json",
-        "number,title,repository,author,assignees,updatedAt,url,labels",
+        "number,title,repository,author,assignees,updatedAt,url,labels,isDraft",
     ]
     result = subprocess.check_output(cmd, text=True)
     return json.loads(result)
+
+def _pr_branches(repo: str, number: int) -> tuple[str, str]:
+    cmd = [
+        "gh",
+        "pr",
+        "view",
+        str(number),
+        "--repo",
+        repo,
+        "--json",
+        "baseRefName,headRefName",
+    ]
+    result = subprocess.check_output(cmd, text=True)
+    data = json.loads(result)
+    return data.get("baseRefName", "-"), data.get("headRefName", "-")
+
 
 
 def _pr_age_color(updated_at: str) -> str:
@@ -109,25 +126,37 @@ def _pr_age_style(updated_at: str) -> str:
     return "red"
 
 
-@task
-def prs(ctx: Context) -> None:
+@task(iterable=('exclude',))
+def prs(ctx: Context, exclude: list[str] = None) -> None:
     """
     List open PRs in the organisation, excluding archived and ignored repos.
     """
+    # turn into dependabot AND dependabot[bot]
+    exclude = set(item for user in (exclude or ()) for item in (user, f"{user}[bot]"))
+
     console = Console()
 
     table = Table(
         box=box.SIMPLE,
         header_style="bold",
         show_lines=False,
+        expand=True,
     )
 
-    table.add_column("repo", style="cyan", no_wrap=True)
+    table.add_column(
+        "repo", style="cyan", no_wrap=True, max_width=36, overflow="ellipsis"
+    )
     table.add_column("id", style="green", no_wrap=True)
-    table.add_column("title", overflow="fold")
-    table.add_column("author", style="magenta")
-    table.add_column("assignees", style="blue")
-    table.add_column("updated", justify="right")
+    table.add_column("title", overflow="fold", ratio=2, min_width=24)
+    table.add_column("to", style="white", overflow="ellipsis", ratio=1, min_width=12)
+    table.add_column("from", style="white", overflow="ellipsis", ratio=2, min_width=20)
+    table.add_column(
+        "author", style="magenta", no_wrap=True, overflow="ellipsis", max_width=12
+    )
+    table.add_column(
+        "assignees", style="blue", no_wrap=True, overflow="ellipsis", max_width=12
+    )
+    table.add_column("updated", justify="right", no_wrap=True)
 
     prs = sorted(
         _pr_run_gh(),
@@ -136,6 +165,9 @@ def prs(ctx: Context) -> None:
     )
 
     for pr in prs:
+        if pr["isDraft"]:
+            continue
+
         repo = pr["repository"]["nameWithOwner"]
         if repo in PR_EXCLUDED_REPOS:
             continue
@@ -146,8 +178,15 @@ def prs(ctx: Context) -> None:
         )
 
         title = Text.from_markup(pr["title"], emoji=True)
+        try:
+            base_ref, head_ref = _pr_branches(repo, pr["number"])
+        except subprocess.CalledProcessError:
+            base_ref, head_ref = "-", "-"
 
         author = pr["author"]["login"]
+
+        if author in exclude:
+            continue
 
         assignees = (
             ", ".join(a["login"] for a in pr["assignees"]) if pr["assignees"] else "-"
@@ -162,6 +201,8 @@ def prs(ctx: Context) -> None:
             repo,
             pr_id,
             title,
+            base_ref,
+            head_ref,
             author,
             assignees,
             updated,
