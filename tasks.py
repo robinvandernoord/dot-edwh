@@ -94,6 +94,7 @@ class PullRequest(t.TypedDict):
     title: str
     url: str
     updatedAt: str
+    isDraft: bool
     author: PRUser
     assignees: list[PRUser]
     repository: PRRepository
@@ -112,7 +113,7 @@ def _pr_run_gh() -> list[PullRequest]:
         "--limit",
         str(PR_LIMIT),
         "--json",
-        "number,title,repository,author,assignees,updatedAt,url,labels",
+        "number,title,repository,author,assignees,updatedAt,url,labels,isDraft",
     ]
     result = subprocess.check_output(cmd, text=True)
     return json.loads(result)
@@ -269,6 +270,22 @@ def contributions(
     plt.show()
 
 
+def _pr_branches(repo: str, number: int) -> tuple[str, str]:
+    cmd = [
+        "gh",
+        "pr",
+        "view",
+        str(number),
+        "--repo",
+        repo,
+        "--json",
+        "baseRefName,headRefName",
+    ]
+    result = subprocess.check_output(cmd, text=True)
+    data = json.loads(result)
+    return data.get("baseRefName", "-"), data.get("headRefName", "-")
+
+
 def _pr_age_color(updated_at: str) -> str:
     updated = dt.datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
     days = (dt.datetime.now(dt.UTC) - updated).days
@@ -332,6 +349,9 @@ def prs(ctx: Context, exclude: list[str] = None) -> None:
     )
 
     for pr in prs:
+        if pr["isDraft"]:
+            continue
+
         repo = pr["repository"]["nameWithOwner"]
         if repo in PR_EXCLUDED_REPOS:
             continue
