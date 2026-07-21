@@ -43,6 +43,44 @@ PR_EXCLUDED_REPOS = {
 }
 
 
+CONTRIBUTION_QUERY = """
+query($login: String!, $from: DateTime!, $to: DateTime!) {
+  user(login: $login) {
+    contributionsCollection(from: $from, to: $to) {
+      totalCommitContributions
+    }
+  }
+}
+"""
+
+
+PR_COUNT_QUERY = """
+query($search: String!) {
+  search(query: $search, type: ISSUE, first: 1) {
+    issueCount
+  }
+}
+"""
+
+
+LOC_QUERY = """
+query($search: String!, $after: String) {
+  search(query: $search, type: ISSUE, first: 100, after: $after) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      ... on PullRequest {
+        additions
+        deletions
+      }
+    }
+  }
+}
+"""
+
+
 class PRUser(t.TypedDict):
     login: str
 
@@ -94,6 +132,141 @@ def _pr_branches(repo: str, number: int) -> tuple[str, str]:
     result = subprocess.check_output(cmd, text=True)
     data = json.loads(result)
     return data.get("baseRefName", "-"), data.get("headRefName", "-")
+
+
+def _github_graphql(query: str, **variables: str) -> dict[str, t.Any]:
+    command = [
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        f"query={query}",
+    ]
+    for key, value in variables.items():
+        command.extend(("-f", f"{key}={value}"))
+    result = subprocess.check_output(command, text=True)
+    return json.loads(result)["data"]
+
+
+def _periods(interval: str, count: int) -> list[tuple[dt.date, dt.date, str]]:
+    today = dt.date.today()
+    if interval == "month":
+        start = dt.date(today.year, today.month, 1)
+
+        def shift_months(offset: int) -> dt.date:
+            month = start.year * 12 + start.month - 1 + offset
+            return dt.date(month // 12, month % 12 + 1, 1)
+
+        return [
+            (
+                shift_months(offset),
+                today + dt.timedelta(days=1)
+                if offset == 0
+                else shift_months(offset + 1),
+                shift_months(offset).strftime("%Y-%m"),
+            )
+            for offset in range(1 - count, 1)
+        ]
+
+    return [
+        (
+            dt.date(today.year + offset, 1, 1),
+            today + dt.timedelta(days=1)
+            if offset == 0
+            else dt.date(today.year + offset + 1, 1, 1),
+            str(today.year + offset),
+        )
+        for offset in range(1 - count, 1)
+    ]
+
+
+def _period_commits(login: str, start: dt.date, end: dt.date) -> int:
+    collection = _github_graphql(
+        CONTRIBUTION_QUERY,
+        login=login,
+        **{
+            "from": f"{start.isoformat()}T00:00:00Z",
+            "to": f"{end.isoformat()}T00:00:00Z",
+        },
+    )["user"]["contributionsCollection"]
+    return collection["totalCommitContributions"]
+
+
+def _period_prs(login: str, start: dt.date, end: dt.date) -> int:
+    last_day = end - dt.timedelta(days=1)
+    search = f"author:{login} is:pr created:{start.isoformat()}..{last_day.isoformat()}"
+    return _github_graphql(PR_COUNT_QUERY, search=search)["search"]["issueCount"]
+
+
+def _period_loc(login: str, start: dt.date, end: dt.date) -> int:
+    last_day = end - dt.timedelta(days=1)
+    search = f"author:{login} is:pr created:{start.isoformat()}..{last_day.isoformat()}"
+    additions = deletions = 0
+    after = ""
+
+    while True:
+        variables = {"search": search}
+        if after:
+            variables["after"] = after
+        result = _github_graphql(LOC_QUERY, **variables)["search"]
+        for pull_request in result["nodes"]:
+            additions += pull_request["additions"]
+            deletions += pull_request["deletions"]
+        if not result["pageInfo"]["hasNextPage"]:
+            return additions + deletions
+        after = result["pageInfo"]["endCursor"]
+
+
+@task
+def contributions(
+    _: Context,
+    kind: str = "commits",
+    interval: str = "month",
+    periods: int = 12,
+    user: str = "",
+) -> None:
+    """Plot commits, PRs, or LOC per calendar month or year for USER."""
+    if kind not in {"commits", "prs", "loc"}:
+        raise ValueError("kind must be one of: commits, prs, loc")
+    if interval not in {"month", "year"}:
+        raise ValueError("interval must be month or year")
+    if periods < 1:
+        raise ValueError("periods must be at least 1")
+
+    try:
+        import plotext as plt
+    except ImportError as error:
+        raise RuntimeError("Install plotext with: uvenv inject edwh plotext") from error
+
+    if not user:
+        user = subprocess.check_output(
+            ["gh", "api", "user", "--jq", ".login"], text=True
+        ).strip()
+
+    periods_to_plot = _periods(interval, periods)
+    labels = [label for _, _, label in periods_to_plot]
+    if kind == "loc":
+        values = [_period_loc(user, start, end) for start, end, _ in periods_to_plot]
+        title = f"Lines changed in {user}'s PRs by {interval}"
+        y_label = "lines changed"
+    else:
+        metric = _period_commits if kind == "commits" else _period_prs
+        values = [metric(user, start, end) for start, end, _ in periods_to_plot]
+        title = f"GitHub {kind} for {user} by {interval}"
+        y_label = kind
+
+    maximum = max(values, default=0)
+    tick_step = max(1, (maximum + 4) // 5)
+    y_ticks = list(range(0, maximum + tick_step + 1, tick_step))
+
+    plt.clear_figure()
+    plt.bar(labels, values)
+    plt.title(title)
+    plt.xlabel(interval)
+    plt.ylabel(y_label)
+    plt.yticks(y_ticks)
+    plt.plotsize(None, 15)
+    plt.show()
 
 
 def _pr_age_color(updated_at: str) -> str:
